@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/oracle-samples/gorm-oracle/oracle"
@@ -14,11 +17,11 @@ import (
 
 // Customer is a simple example model to demonstrate GORM + Oracle.
 type Customer struct {
-	ID        uint   `gorm:"primaryKey"`
-	Name      string `gorm:"size:100;not null"`
-	Email     string `gorm:"size:200;uniqueIndex"`
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"size:100;not null" json:"name"`
+	Email     string    `gorm:"size:200;uniqueIndex" json:"email"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // TableName sets an explicit table name for Oracle (unquoted identifiers are uppercased).
@@ -26,19 +29,15 @@ func (Customer) TableName() string {
 	return "CUSTOMERS"
 }
 
+type App struct {
+	DB *gorm.DB
+}
+
 func main() {
-	// Read connection settings from environment variables.
+	// Read connection settings from environment variables. Fail fast if missing.
 	user := mustEnv("ORA_USER")         // e.g. "ADMIN"
 	password := mustEnv("ORA_PASSWORD") // e.g. "YourStrongPwd"
 	connectString := mustEnv("ORA_CONNECT_STRING")
-	// Examples:
-	// - Easy Connect: "localhost:1521/XEPDB1"
-	// - Autonomous Database TCPS descriptor:
-	//   (description=(retry_count=20)(retry_delay=3)
-	//     (address=(protocol=tcps)(port=1522)(host=your-adb-host.adb.oraclecloud.com))
-	//     (connect_data=(service_name=your_service_name_high.adb.oraclecloud.com))
-	//     (security=(ssl_server_dn_match=yes)))
-	//
 	// Optional: Path to Oracle Instant Client (if not on system path), e.g. "/opt/oracle/instantclient_23_5"
 	libDir := os.Getenv("ORA_LIB_DIR")
 
@@ -80,36 +79,84 @@ func main() {
 	}
 	log.Println("AutoMigrate completed.")
 
-	// Gorm Oracle database CRUD Operations
+	app := &App{DB: db}
 
-	// Create
-	email := fmt.Sprintf("alice+%d@example.com", time.Now().UnixNano())
-	c := Customer{Name: "Alice", Email: email}
-	if err := db.Create(&c).Error; err != nil {
-		log.Fatalf("Create failed: %v", err)
+	// Routes
+	http.HandleFunc("/api/customers", app.handleCustomers)
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	// Static frontend (React via CDN)
+	fs := http.FileServer(http.Dir("web"))
+	http.Handle("/", fs)
+
+	addr := ":8080"
+	log.Printf("Server listening at http://localhost%s", addr)
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Fatalf("server error: %v", err)
 	}
-	log.Printf("Inserted customer ID=%d\n", c.ID)
+}
 
-	// Read (by primary key)
-	var got Customer
-	if err := db.First(&got, c.ID).Error; err != nil {
-		log.Fatalf("First failed: %v", err)
+func (a *App) handleCustomers(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w, r)
+	switch r.Method {
+	case http.MethodOptions:
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case http.MethodGet:
+		a.listCustomers(w, r)
+	case http.MethodPost:
+		a.createCustomer(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-	log.Printf("Fetched customer: %+v\n", got)
+}
 
-	// Update
-	newEmail := fmt.Sprintf("alice+%d@newdomain.com", time.Now().UnixNano())
-	if err := db.Model(&got).Update("Email", newEmail).Error; err != nil {
-		log.Fatalf("Update failed: %v", err)
-	}
-	log.Println("Updated email.")
-
-	// Query many
+func (a *App) listCustomers(w http.ResponseWriter, r *http.Request) {
 	var all []Customer
-	if err := db.Order(clause.Column{Name: "id"}).Find(&all).Error; err != nil {
-		log.Fatalf("Find failed: %v", err)
+	if err := a.DB.Order(clause.Column{Name: "id"}).Find(&all).Error; err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
 	}
-	log.Printf("Total customers: %d\n", len(all))
+	writeJSON(w, http.StatusOK, all)
+}
+
+func (a *App) createCustomer(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	in.Email = strings.TrimSpace(in.Email)
+	if in.Name == "" || in.Email == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and email are required"})
+		return
+	}
+
+	c := Customer{Name: in.Name, Email: in.Email}
+	if err := a.DB.Create(&c).Error; err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, c)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func enableCORS(w http.ResponseWriter, r *http.Request) {
+	// For local dev; serving same-origin so this is just permissive.
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 }
 
 func mustEnv(key string) string {

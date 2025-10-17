@@ -1,0 +1,192 @@
+<!--
+Simple React frontend to create and list Customers via the Go + GORM + Oracle backend.
+Served statically from / (main.go uses http.FileServer on the web directory).
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>GORM + Oracle Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+        margin: 0; padding: 0; line-height: 1.5;
+      }
+      .container { max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+      h1 { margin: 0 0 1rem; font-size: 1.6rem; }
+      .card { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+      .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+      .row > * { flex: 1 1 250px; }
+      input, button {
+        font: inherit; padding: 0.6rem 0.8rem; border-radius: 6px; border: 1px solid #bbb;
+      }
+      button { cursor: pointer; border: 1px solid #888; }
+      button.primary { background: #0b5ed7; color: #fff; border-color: #0a58ca; }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      .error { color: #b00020; margin-top: 0.5rem; }
+      table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+      th, td { border-bottom: 1px solid #ddd; text-align: left; padding: 0.5rem; font-size: 0.95rem; }
+      .muted { opacity: 0.7; }
+      .actions { display: flex; gap: 0.5rem; }
+      .footer { margin-top: 2rem; font-size: 0.9rem; }
+      code { background: rgba(127,127,127,.2); padding: 0.15rem 0.3rem; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- React 18 UMD + Babel for JSX (dev only) -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+
+    <script type="text/babel">
+      const { useEffect, useState } = React;
+
+      function App() {
+        const [customers, setCustomers] = useState([]);
+        const [loading, setLoading] = useState(false);
+        const [creating, setCreating] = useState(false);
+        const [name, setName] = useState("");
+        const [email, setEmail] = useState("");
+        const [error, setError] = useState("");
+
+        async function fetchCustomers() {
+          setLoading(true);
+          setError("");
+          try {
+            const res = await fetch("/api/customers");
+            if (!res.ok) {
+              const txt = await res.text();
+              throw new Error(txt || "Failed to fetch customers");
+            }
+            const data = await res.json();
+            setCustomers(data);
+          } catch (e) {
+            setError(e.message || String(e));
+          } finally {
+            setLoading(false);
+          }
+        }
+
+        useEffect(() => {
+          fetchCustomers();
+        }, []);
+
+        async function createCustomer(e) {
+          e.preventDefault();
+          setCreating(true);
+          setError("");
+          try {
+            const res = await fetch("/api/customers", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, email }),
+            });
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              const msg = data?.error || (await res.text());
+              throw new Error(msg || "Failed to create customer");
+            }
+            const created = await res.json();
+            setCustomers((prev) => [created, ...prev]);
+            setName("");
+            setEmail("");
+          } catch (e) {
+            setError(e.message || String(e));
+          } finally {
+            setCreating(false);
+          }
+        }
+
+        return (
+          <div className="container">
+            <h1>GORM + Oracle Demo</h1>
+
+            <div className="card">
+              <h2 style={{marginTop: 0, fontSize: "1.2rem"}}>Create Customer</h2>
+              <form onSubmit={createCustomer} className="row" autoComplete="off">
+                <input
+                  placeholder="Name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                />
+                <input
+                  placeholder="Email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                />
+                <div className="actions">
+                  <button className="primary" type="submit" disabled={creating}>
+                    {creating ? "Creating..." : "Create"}
+                  </button>
+                  <button type="button" onClick={fetchCustomers} disabled={loading}>
+                    {loading ? "Refreshing..." : "Refresh"}
+                  </button>
+                </div>
+              </form>
+              {error ? <div className="error">Error: {error}</div> : null}
+              <div className="muted" style={{marginTop: ".5rem"}}>
+                Note: Email must be unique (enforced by DB index).
+              </div>
+            </div>
+
+            <div className="card">
+              <h2 style={{marginTop: 0, fontSize: "1.2rem"}}>Customers</h2>
+              {loading && customers.length === 0 ? (
+                <div>Loading...</div>
+              ) : customers.length === 0 ? (
+                <div className="muted">No customers yet.</div>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Created</th>
+                      <th>Updated</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customers.map((c) => (
+                      <tr key={c.id}>
+                        <td>{c.id}</td>
+                        <td>{c.name}</td>
+                        <td>{c.email}</td>
+                        <td>{formatDate(c.createdAt)}</td>
+                        <td>{formatDate(c.updatedAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="footer">
+              Backend running at <code>/api/customers</code>. Open <code>http://localhost:8080</code> to use this UI.
+            </div>
+          </div>
+        );
+      }
+
+      function formatDate(s) {
+        if (!s) return "";
+        try {
+          const d = new Date(s);
+          return d.toLocaleString();
+        } catch {
+          return String(s);
+        }
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
